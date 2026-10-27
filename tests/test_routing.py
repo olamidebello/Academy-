@@ -31,3 +31,25 @@ class CertificateTests(unittest.TestCase):
  def test_accepts_valid_chain_hostname_and_key(self):
   from subprocess import CompletedProcess as R
   self.assertTrue(self.check_certificate([R([],0),R([],0),R([],0),R([],0,b'one'),R([],0,b'one')]))
+
+class ActivationTests(unittest.TestCase):
+ def test_explicit_listeners_are_mirrored(self):
+  from scripts.repair_routing import listen_directives
+  dump='server { listen 154.16.170.86:80; listen 127.0.0.1:80; listen [::1]:443 ssl; } # listen 1.2.3.4:80;'
+  http=listen_directives(dump,80);self.assertIn('listen 154.16.170.86:80;',http);self.assertIn('listen 127.0.0.1:80;',http);self.assertNotIn('1.2.3.4',http)
+  self.assertIn('listen [::1]:443 ssl;',listen_directives(dump,443))
+ def test_reload_grace_period(self):
+  import tempfile
+  from pathlib import Path
+  from unittest.mock import patch
+  from scripts.repair_routing import verify_page
+  with tempfile.TemporaryDirectory() as temp, patch('scripts.repair_routing.run',side_effect=['<title>SprintForge</title>','<title>Academy</title>']),patch('scripts.repair_routing.time.sleep') as sleep:
+   self.assertIn('Academy',verify_page('http://academy.africandroid.world/','academy.africandroid.world',80,Path(temp),tries=2));sleep.assert_called_once()
+ def test_failure_saves_response(self):
+  import tempfile
+  from pathlib import Path
+  from unittest.mock import patch
+  from scripts.repair_routing import verify_page
+  with tempfile.TemporaryDirectory() as temp,patch('scripts.repair_routing.run',return_value='<title>Moved</title>'):
+   with self.assertRaisesRegex(RuntimeError,'Unexpected page title: Moved'):verify_page('http://academy.africandroid.world/','academy.africandroid.world',80,Path(temp),tries=1)
+   self.assertTrue((Path(temp)/'http-80-body.html').exists())
