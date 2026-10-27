@@ -1,0 +1,188 @@
+---
+- name: Rebuild Academy and repair domain routing
+  hosts: all
+  become: true
+  vars:
+    academy_domain: academy.africandroid.world
+    academy_port: 18840
+    academy_email: ''
+    academy_revision: main
+  tasks:
+    - name: Validate fixed domain and port
+      ansible.builtin.assert:
+        that:
+          - academy_domain == 'academy.africandroid.world'
+          - academy_port | int == 18840
+    - name: Install runtime and repair tools
+      ansible.builtin.apt:
+        name: [python3, python3-venv, python3-pip, git, nginx, curl, openssl, certbot]
+        update_cache: true
+    - name: Validate current nginx
+      ansible.builtin.command: nginx -t
+      changed_when: false
+    - name: Create service account
+      ansible.builtin.user:
+        name: academy
+        system: true
+        home: /var/lib/academy
+        shell: /usr/sbin/nologin
+    - name: Secure state directories
+      ansible.builtin.file:
+        path: '{{ item }}'
+        state: directory
+        owner: '{{ "root" if item == "/var/lib/academy-repair" else "academy" }}'
+        group: '{{ "root" if item == "/var/lib/academy-repair" else "academy" }}'
+        mode: '0700'
+      loop: [/var/lib/academy, /var/lib/academy-repair]
+    - name: Generate release directory
+      ansible.builtin.set_fact:
+        academy_release: '/opt/academy-releases/{{ now(utc=true, fmt="%Y%m%dT%H%M%S%fZ") }}'
+    - name: Check previous service
+      ansible.builtin.stat:
+        path: /etc/systemd/system/academy.service
+      register: academy_old_service
+    - name: Read previous service
+      ansible.builtin.slurp:
+        src: /etc/systemd/system/academy.service
+      when: academy_old_service.stat.exists
+      register: academy_old_unit
+    - name: Create release directory
+      ansible.builtin.file:
+        path: '{{ academy_release }}'
+        state: directory
+        mode: '0755'
+    - name: Back up database before schema initialization
+      ansible.builtin.shell: |
+        python3 - <<'PY'
+        import pathlib, sqlite3
+        source=pathlib.Path('/var/lib/academy/academy.db')
+        if source.exists():
+            with sqlite3.connect(source) as src, sqlite3.connect('{{ academy_release }}/database-before.db') as dst:
+                src.backup(dst)
+            pathlib.Path('{{ academy_release }}/database-before.db').chmod(0o600)
+        PY
+      changed_when: false
+    - name: Fetch clean release
+      ansible.builtin.git:
+        repo: https://github.com/olamidebello/Academy-.git
+        dest: '{{ academy_release }}/source'
+        version: '{{ academy_revision }}'
+    - name: Test before activation
+      ansible.builtin.command: python3 -m unittest discover -s tests -v
+      args:
+        chdir: '{{ academy_release }}/source'
+      changed_when: false
+    - name: Build isolated application runtime
+      ansible.builtin.pip:
+        name: gunicorn==23.0.0
+        virtualenv: '{{ academy_release }}/venv'
+        virtualenv_command: python3 -m venv
+    - name: Initialize schema preserving existing records
+      ansible.builtin.command: python3 {{ academy_release }}/source/manage.py init
+      become_user: academy
+      environment:
+        ACADEMY_DB: /var/lib/academy/academy.db
+      changed_when: false
+    - name: Activate release with rollback
+      block:
+        - name: Install rebuilt service
+          ansible.builtin.copy:
+            dest: /etc/systemd/system/academy.service
+            mode: '0644'
+            content: |
+              [Unit]
+              Description=Academy school management
+              After=network.target
+              [Service]
+              User=academy
+              Group=academy
+              WorkingDirectory={{ academy_release }}/source
+              Environment=ACADEMY_DB=/var/lib/academy/academy.db
+              Environment=ACADEMY_SECURE_COOKIE=1
+              ExecStart={{ academy_release }}/venv/bin/gunicorn --workers 2 --bind 127.0.0.1:{{ academy_port }} app:application
+              Restart=on-failure
+              UMask=0077
+              NoNewPrivileges=true
+              ProtectSystem=strict
+              ReadWritePaths=/var/lib/academy
+              PrivateTmp=true
+              [Install]
+              WantedBy=multi-user.target
+        - name: Start Academy
+          ansible.builtin.systemd:
+            name: academy
+            daemon_reload: true
+            enabled: true
+            state: restarted
+        - name: Wait for readiness
+          ansible.builtin.uri:
+            url: http://127.0.0.1:{{ academy_port }}/health
+            status_code: 200
+          register: academy_health
+          retries: 10
+          delay: 2
+          until: academy_health.status == 200
+        - name: Repair exact domain and verify HTTPS identity
+          ansible.builtin.command:
+            argv:
+              - python3
+              - '{{ academy_release }}/source/scripts/repair_routing.py'
+              - --domain
+              - '{{ academy_domain }}'
+              - --port
+              - '{{ academy_port | string }}'
+              - --email
+              - '{{ academy_email }}'
+        - name: Enable certificate renewal
+          ansible.builtin.systemd:
+            name: certbot.timer
+            enabled: true
+            state: started
+        - name: Create renewal hook directory
+          ansible.builtin.file:
+            path: /etc/letsencrypt/renewal-hooks/deploy
+            state: directory
+            mode: '0755'
+        - name: Reload nginx after certificate renewals
+          ansible.builtin.copy:
+            dest: /etc/letsencrypt/renewal-hooks/deploy/academy-nginx
+            mode: '0755'
+            content: |
+              #!/bin/sh
+              nginx -t && systemctl reload nginx
+      rescue:
+        - name: Restore previous service configuration
+          ansible.builtin.copy:
+            dest: /etc/systemd/system/academy.service
+            content: '{{ academy_old_unit.content | b64decode }}'
+            mode: '0644'
+          when: academy_old_service.stat.exists
+        - name: Restart previous service
+          ansible.builtin.systemd:
+            name: academy
+            daemon_reload: true
+            state: restarted
+          when: academy_old_service.stat.exists
+        - name: Stop unsuccessful first installation
+          ansible.builtin.systemd:
+            name: academy
+            state: stopped
+            enabled: false
+          when: not academy_old_service.stat.exists
+        - name: Report failure
+          ansible.builtin.fail:
+            msg: 'Repair failed; previous service restored when present. Routing helper rolls back its own failed changes. Check /var/lib/academy-repair/latest-report.json and the failed task. Data and old releases retained.'
+    - name: Check public HTTPS without bypassing DNS
+      ansible.builtin.uri:
+        url: https://{{ academy_domain }}/
+        return_content: true
+        validate_certs: true
+      register: academy_public
+      failed_when: false
+      changed_when: false
+    - name: Report public routing result
+      ansible.builtin.debug:
+        msg: '{{ "Public HTTPS serves Academy" if (academy_public.status | default(0) == 200 and "<title>Academy" in (academy_public.content | default("")) and "SprintForge" not in (academy_public.content | default(""))) else "Local HTTPS verified. Public routing remains unverified or incorrect: check DNS A/AAAA, CDN origin and cached pages." }}'
+    - name: Show account setup command
+      ansible.builtin.debug:
+        msg: 'If no Academy account exists: sudo -u academy env ACADEMY_DB=/var/lib/academy/academy.db python3 {{ academy_release }}/source/manage.py create-superadmin dobcalldemo@gmail.com'
