@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Repair only exact Academy server_name entries; preserve other domains."""
-import argparse, datetime, hashlib, json, os, pathlib, re, shutil, sqlite3, subprocess, sys
+import argparse, datetime, hashlib, json, os, pathlib, re, shutil, sqlite3, subprocess, sys, time
 DOMAIN='academy.africandroid.world'
 TOKEN=re.compile(r'#\s*[^\n]*|"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[{};]|[^\s{};#]+')
 def rename_conflicts(text,domain):
@@ -25,6 +25,32 @@ def run(args):
     r=subprocess.run(args,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=180)
     if r.returncode: raise RuntimeError('Command failed: '+args[0]+'\n'+r.stderr[-4000:])
     return r.stdout+r.stderr
+def listen_directives(dump,port):
+    # Nginx selects a matching address socket before evaluating server_name.
+    # Mirror existing explicit sockets so a wildcard listener cannot lose to them.
+    addresses={str(port),'[::]:'+str(port)}
+    tokens=[m.group() for m in TOKEN.finditer(dump) if not m.group().startswith('#')]
+    for i,t in enumerate(tokens[:-1]):
+        address=tokens[i+1]
+        if t=='listen' and re.fullmatch(r'(?:[0-9.]+|\[[0-9a-fA-F:]+\]):'+str(port),address):
+            addresses.add(str(port) if address=='0.0.0.0:'+str(port) else address)
+    return ' '.join('listen '+address+(' ssl' if port==443 else '')+';' for address in sorted(addresses))
+
+def verify_page(url,domain,port,backup,tries=20):
+    last='No response'
+    for attempt in range(tries):
+        try:
+            page=run(['curl','--fail','--silent','--show-error','--max-time','5','--noproxy','*',
+                      '--dump-header',str(backup/('http-'+str(port)+'-headers.txt')),
+                      '--resolve',f'{domain}:{port}:127.0.0.1',url])
+            (backup/('http-'+str(port)+'-body.html')).write_text(page)
+            if '<title>Academy' in page and 'SprintForge' not in page: return page
+            title=re.search(r'<title[^>]*>(.*?)</title>',page,re.I|re.S)
+            last='Unexpected page title: '+(title.group(1)[:200] if title else '(no HTML title; inspect saved response headers/body)')
+        except RuntimeError as e: last=str(e)
+        if attempt+1<tries: time.sleep(0.5)
+    raise RuntimeError('Academy route verification failed for '+url+': '+last+'; response diagnostics: '+str(backup))
+
 def certificate_usable(cert,key,domain):
     if not cert.exists() or not key.exists(): return False
     checks=[['openssl','x509','-checkend','604800','-noout','-in',str(cert)],
@@ -58,6 +84,7 @@ def main():
             with sqlite3.connect(db) as src, sqlite3.connect(backup/'academy.db') as dst: src.backup(dst)
         files={pathlib.Path(x).resolve() for x in re.findall(r'^# configuration file (.+):$',dump,re.M)}
         target=pathlib.Path('/etc/nginx/conf.d/academy-repaired.conf'); remember(target)
+        report['loaded_config_files']=[str(f) for f in sorted(files)]
         count=0
         for file in sorted(files):
             if file==target.resolve() or not file.is_file(): continue
@@ -67,13 +94,17 @@ def main():
         def config(cert=None,key=None):
             proxy=f'location / {{ proxy_pass http://127.0.0.1:{a.port}; proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme; proxy_set_header X-Real-IP $remote_addr; }}'
             acme=f'location ^~ /.well-known/acme-challenge/ {{ root {root}; }}'
+            http_listen=listen_directives(dump,80); https_listen=listen_directives(dump,443)
             if cert:
-                return f'''server {{ listen 80; listen [::]:80; server_name {a.domain}; {acme} location / {{ return 301 https://$host$request_uri; }} }}
-server {{ listen 443 ssl; listen [::]:443 ssl; server_name {a.domain}; ssl_certificate {cert}; ssl_certificate_key {key}; ssl_protocols TLSv1.2 TLSv1.3; client_max_body_size 1m; {proxy} }}\n'''
-            return f'server {{ listen 80; listen [::]:80; server_name {a.domain}; {acme} client_max_body_size 1m; {proxy} }}\n'
+                return f'''server {{ {http_listen} server_name {a.domain}; {acme} location / {{ return 301 https://$host$request_uri; }} }}
+server {{ {https_listen} server_name {a.domain}; ssl_certificate {cert}; ssl_certificate_key {key}; ssl_protocols TLSv1.2 TLSv1.3; client_max_body_size 1m; {proxy} }}\n'''
+            return f'server {{ {http_listen} server_name {a.domain}; {acme} client_max_body_size 1m; {proxy} }}\n'
         atomic_write(target,config()); run(['nginx','-t']); run(['systemctl','reload','nginx'])
-        page=run(['curl','--fail','--silent','--show-error','--max-time','30','--noproxy','*','--resolve',f'{a.domain}:80:127.0.0.1',f'http://{a.domain}/'])
-        if '<title>Academy' not in page or 'SprintForge' in page: raise RuntimeError('Local HTTP domain returned the wrong application')
+        after=run(['nginx','-T']); (backup/'nginx-after.txt').write_text(after)
+        if '# configuration file '+str(target)+':' not in after:
+            raise RuntimeError('Nginx does not include /etc/nginx/conf.d/academy-repaired.conf; add the conf.d include inside the active http block before retrying')
+        report['conflicting_names_repaired']=count
+        verify_page(f'http://{a.domain}/',a.domain,80,backup)
         certdir=pathlib.Path('/etc/letsencrypt/live')/a.domain; cert=certdir/'fullchain.pem'; key=certdir/'privkey.pem'
         usable=certificate_usable(cert,key,a.domain)
         if not usable:
@@ -83,8 +114,7 @@ server {{ listen 443 ssl; listen [::]:443 ssl; server_name {a.domain}; ssl_certi
             run(command)
         if not certificate_usable(cert,key,a.domain): raise RuntimeError('Certificate failed hostname, expiry, public trust chain or private-key verification')
         atomic_write(target,config(cert,key)); run(['nginx','-t']); run(['systemctl','reload','nginx'])
-        page=run(['curl','--fail','--silent','--show-error','--max-time','30','--noproxy','*','--resolve',f'{a.domain}:443:127.0.0.1',f'https://{a.domain}/'])
-        if '<title>Academy' not in page or 'SprintForge' in page: raise RuntimeError('HTTPS domain still returns another application')
+        verify_page(f'https://{a.domain}/',a.domain,443,backup)
         health=run(['curl','--fail','--silent','--show-error','--max-time','30','--noproxy','*','--resolve',f'{a.domain}:443:127.0.0.1',f'https://{a.domain}/health'])
         if json.loads(health).get('status')!='ok': raise RuntimeError('HTTPS health verification failed')
         report.update(status='success',conflicting_names_repaired=count,local_https_verified=True,public_dns_verified=False)
