@@ -25,6 +25,17 @@ def run(args):
     r=subprocess.run(args,text=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=180)
     if r.returncode: raise RuntimeError('Command failed: '+args[0]+'\n'+r.stderr[-4000:])
     return r.stdout+r.stderr
+def certificate_usable(cert,key,domain):
+    if not cert.exists() or not key.exists(): return False
+    checks=[['openssl','x509','-checkend','604800','-noout','-in',str(cert)],
+            ['openssl','x509','-checkhost',domain,'-noout','-in',str(cert)],
+            ['openssl','verify','-purpose','sslserver','-verify_hostname',domain,
+             '-CAfile','/etc/ssl/certs/ca-certificates.crt','-untrusted',str(cert),str(cert)]]
+    for cmd in checks:
+        if subprocess.run(cmd,capture_output=True,timeout=15).returncode: return False
+    public=subprocess.run(['openssl','x509','-pubkey','-noout','-in',str(cert)],capture_output=True,timeout=15)
+    private=subprocess.run(['openssl','pkey','-pubout','-in',str(key)],capture_output=True,timeout=15)
+    return public.returncode==0 and private.returncode==0 and public.stdout==private.stdout
 def atomic_write(path,text):
     path=pathlib.Path(path); tmp=path.with_name(path.name+'.academy-tmp'); tmp.write_text(text); os.chmod(tmp,0o644); os.replace(tmp,path)
 def main():
@@ -64,13 +75,13 @@ server {{ listen 443 ssl; listen [::]:443 ssl; server_name {a.domain}; ssl_certi
         page=run(['curl','--fail','--silent','--show-error','--max-time','30','--noproxy','*','--resolve',f'{a.domain}:80:127.0.0.1',f'http://{a.domain}/'])
         if '<title>Academy' not in page or 'SprintForge' in page: raise RuntimeError('Local HTTP domain returned the wrong application')
         certdir=pathlib.Path('/etc/letsencrypt/live')/a.domain; cert=certdir/'fullchain.pem'; key=certdir/'privkey.pem'
-        usable=cert.exists() and key.exists()
-        if usable:
-            usable=subprocess.run(['openssl','x509','-checkend','604800','-noout','-in',str(cert)],capture_output=True).returncode==0
+        usable=certificate_usable(cert,key,a.domain)
         if not usable:
-            if not a.email: raise RuntimeError('No usable Academy TLS certificate. Re-run with -e academy_email=YOUR_EMAIL and ensure public A/AAAA records reach this server.')
-            run(['certbot','certonly','--webroot','-w',str(root),'-d',a.domain,'--email',a.email,'--agree-tos','--non-interactive','--keep-until-expiring'])
-        if not cert.exists() or not key.exists(): raise RuntimeError('TLS certificate files were not created')
+            if not a.email: raise RuntimeError('No trusted, matching Academy TLS certificate. Re-run with -e academy_email=YOUR_EMAIL and ensure public A/AAAA records reach this server.')
+            command=['certbot','certonly','--webroot','-w',str(root),'--cert-name',a.domain,'-d',a.domain,'--email',a.email,'--agree-tos','--non-interactive']
+            if cert.exists(): command.append('--force-renewal')
+            run(command)
+        if not certificate_usable(cert,key,a.domain): raise RuntimeError('Certificate failed hostname, expiry, public trust chain or private-key verification')
         atomic_write(target,config(cert,key)); run(['nginx','-t']); run(['systemctl','reload','nginx'])
         page=run(['curl','--fail','--silent','--show-error','--max-time','30','--noproxy','*','--resolve',f'{a.domain}:443:127.0.0.1',f'https://{a.domain}/'])
         if '<title>Academy' not in page or 'SprintForge' in page: raise RuntimeError('HTTPS domain still returns another application')
