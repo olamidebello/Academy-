@@ -65,7 +65,7 @@ def certificate_usable(cert,key,domain):
 def atomic_write(path,text):
     path=pathlib.Path(path); tmp=path.with_name(path.name+'.academy-tmp'); tmp.write_text(text); os.chmod(tmp,0o644); os.replace(tmp,path)
 def main():
-    p=argparse.ArgumentParser(); p.add_argument('--domain',default=DOMAIN); p.add_argument('--port',type=int,default=18840); p.add_argument('--email',default=''); p.add_argument('--backup-root',default='/var/lib/academy-repair'); a=p.parse_args()
+    p=argparse.ArgumentParser(); p.add_argument('--domain',default=DOMAIN); p.add_argument('--port',type=int,default=18940); p.add_argument('--email',default=''); p.add_argument('--backup-root',default='/var/lib/academy-repair'); a=p.parse_args()
     if a.domain!=DOMAIN: p.error('This repair is restricted to '+DOMAIN)
     stamp=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ'); backup=pathlib.Path(a.backup_root)/stamp; backup.mkdir(parents=True,mode=0o700)
     report={'domain':a.domain,'backup':str(backup),'status':'started'}; changes={}; created=[]
