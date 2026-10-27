@@ -1,5 +1,6 @@
 """Academy: dependency-free, tenant-scoped school operations server."""
 from pathlib import Path
+import base64
 import os, sqlite3, json, secrets, hashlib, hmac, time, math, html, re
 from datetime import datetime, timezone
 from urllib.parse import parse_qs
@@ -175,8 +176,13 @@ def application(env,start):
  status='200 OK'; headers=[('Content-Type','application/json'),('X-Content-Type-Options','nosniff'),('X-Frame-Options','DENY'),('Cache-Control','no-store'),('Content-Security-Policy',"default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'")]
  try:
   path=env.get('PATH_INFO','/'); method=env['REQUEST_METHOD']
-  if path in {'/','/signup','/demo','/terms','/privacy','/copyright','/static/app.js','/static/style.css'}:
-   file={'/':'index.html','/signup':'index.html','/demo':'demo.html','/terms':'terms.html','/privacy':'privacy.html','/copyright':'copyright.html','/static/app.js':'app.js','/static/style.css':'style.css'}[path]; body=(Path(__file__).parent/'static'/file).read_bytes(); headers[0]=('Content-Type','text/html; charset=utf-8' if file.endswith('.html') else 'text/javascript' if path.endswith('js') else 'text/css')
+  public={'/':'index.html','/signup':'index.html','/demo':'demo.html','/terms':'terms.html','/privacy':'privacy.html','/copyright':'copyright.html','/install':'install.html','/manifest.webmanifest':'manifest.webmanifest','/sw.js':'sw.js','/static/app.js':'app.js','/static/style.css':'style.css','/static/install.js':'install.js','/static/icon.svg':'icon.svg','/static/icon-192.png':'icon-192.b64','/static/icon-512.png':'icon-512.b64'}
+  if path in public:
+   file=public[path]; body=(Path(__file__).parent/'static'/file).read_bytes()
+   if file.endswith('.b64'): body=base64.b64decode(body)
+   mime='image/png' if file.endswith('.b64') else 'text/html; charset=utf-8' if file.endswith('.html') else 'text/javascript' if file.endswith('.js') else 'application/manifest+json' if file.endswith('.webmanifest') else 'image/svg+xml' if file.endswith('.svg') else 'text/css'
+   headers[0]=('Content-Type',mime)
+   if path=='/sw.js': headers.append(('Service-Worker-Allowed','/'))
   elif path=='/health': body=b'{"status":"ok"}'
   else:
    size=int(env.get('CONTENT_LENGTH') or 0)
