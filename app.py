@@ -21,6 +21,8 @@ CREATE TABLE IF NOT EXISTS exams(id INTEGER PRIMARY KEY,tenant INTEGER,title TEX
 CREATE TABLE IF NOT EXISTS attempts(id INTEGER PRIMARY KEY,tenant INTEGER,exam INTEGER,user INTEGER,started REAL,answers TEXT DEFAULT '{}',submitted INTEGER DEFAULT 0,score REAL,UNIQUE(exam,user));
 CREATE TABLE IF NOT EXISTS punches(id INTEGER PRIMARY KEY,tenant INTEGER,user INTEGER,action TEXT,at REAL,lat REAL,lon REAL,accuracy REAL);
 CREATE TABLE IF NOT EXISTS payroll(id INTEGER PRIMARY KEY,tenant INTEGER,start REAL,end REAL,data TEXT,created REAL);
+CREATE TABLE IF NOT EXISTS demo_tenants(tenant INTEGER PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS demo_users(user INTEGER PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS legal_acceptances(user INTEGER,version TEXT,accepted REAL);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,tenant INTEGER,user INTEGER,action TEXT,at REAL);
 ''')
@@ -32,13 +34,17 @@ def distance(a,b,c,d):
  x,y=math.radians(c-a),math.radians(d-b); return 6371000*2*math.asin(math.sqrt(math.sin(x/2)**2+math.cos(math.radians(a))*math.cos(math.radians(c))*math.sin(y/2)**2))
 def api(path,method,d,u,c):
  tenant=u['tenant']; role=u['role']
+ demo=bool(c.execute('SELECT 1 FROM demo_users WHERE user=?',(u['id'],)).fetchone())
+ if demo:
+  if not c.execute('SELECT 1 FROM demo_tenants WHERE tenant=?',(tenant,)).fetchone(): raise PermissionError('Demo account is outside its sandbox')
+  if method!='GET' or path in {'/api/switch-tenant','/api/attempt'}: raise PermissionError('Public demo accounts are read-only. Create your own institution to save changes.')
  def admin():
   if role not in {'admin','superadmin'}: raise PermissionError('Administrator access required')
- if path=='/api/me': return dict(u)
+ if path=='/api/me': return {**dict(u),'is_demo':demo}
  if path=='/api/tenants':
   if role!='superadmin': raise PermissionError('Platform administrator required')
   if method=='POST': c.execute('INSERT INTO tenants(name,level) VALUES(?,?)',(d['name'],d['level'])); audit(c,u,'create institution')
-  return [dict(r) for r in c.execute('SELECT * FROM tenants')]
+  return [dict(r) for r in c.execute('SELECT * FROM tenants'+(' WHERE id IN (SELECT tenant FROM demo_tenants)' if demo else ''))]
  if path=='/api/switch-tenant':
   if role!='superadmin': raise PermissionError('Platform administrator required')
   if method!='POST' or not c.execute('SELECT 1 FROM tenants WHERE id=?',(d.get('tenant'),)).fetchone(): raise ValueError('Valid institution required')
@@ -158,8 +164,8 @@ def application(env,start):
  status='200 OK'; headers=[('Content-Type','application/json'),('X-Content-Type-Options','nosniff'),('X-Frame-Options','DENY'),('Cache-Control','no-store'),('Content-Security-Policy',"default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'")]
  try:
   path=env.get('PATH_INFO','/'); method=env['REQUEST_METHOD']
-  if path in {'/','/signup','/terms','/privacy','/copyright','/static/app.js','/static/style.css'}:
-   file={'/':'index.html','/signup':'index.html','/terms':'terms.html','/privacy':'privacy.html','/copyright':'copyright.html','/static/app.js':'app.js','/static/style.css':'style.css'}[path]; body=(Path(__file__).parent/'static'/file).read_bytes(); headers[0]=('Content-Type','text/html; charset=utf-8' if file.endswith('.html') else 'text/javascript' if path.endswith('js') else 'text/css')
+  if path in {'/','/signup','/demo','/terms','/privacy','/copyright','/static/app.js','/static/style.css'}:
+   file={'/':'index.html','/signup':'index.html','/demo':'demo.html','/terms':'terms.html','/privacy':'privacy.html','/copyright':'copyright.html','/static/app.js':'app.js','/static/style.css':'style.css'}[path]; body=(Path(__file__).parent/'static'/file).read_bytes(); headers[0]=('Content-Type','text/html; charset=utf-8' if file.endswith('.html') else 'text/javascript' if path.endswith('js') else 'text/css')
   elif path=='/health': body=b'{"status":"ok"}'
   else:
    size=int(env.get('CONTENT_LENGTH') or 0)
