@@ -66,3 +66,26 @@ class DemoTests(unittest.TestCase):
   with app.connect() as c:
    u=self.user(c,'admin');self.assertTrue(app.api('/api/me','GET',{},u,c)['is_demo'])
    rows=app.api('/api/records/students','GET',{},u,c);self.assertEqual('Alex Demo',rows[0]['name'])
+ def test_role_matrix_blocks_unassigned_modules_and_features(self):
+  endpoints={'exams':'/api/exams','clock':'/api/clock','payroll':'/api/payroll','users':'/api/users','settings':'/api/settings','audit':'/api/audit','institutions':'/api/tenants','report':'/api/report'}
+  with app.connect() as c:
+   for role in ROLES:
+    u=self.user(c,role);perms=app.permissions(role)
+    self.assertEqual(perms,app.api('/api/me','GET',{},u,c)['permissions'])
+    for module in app.MODULES:
+     if module not in perms['read']:
+      with self.assertRaises(PermissionError,msg=role+' read '+module):app.api('/api/records/'+module,'GET',{},u,c)
+     if module not in perms['write']:
+      with self.assertRaises(PermissionError,msg=role+' write '+module):app.api('/api/records/'+module,'POST',{},u,c)
+    for feature,path in endpoints.items():
+     if feature not in perms['features']:
+      with self.assertRaises(PermissionError,msg=role+' '+feature):app.api(path,'GET',{},u,c)
+ def test_staff_leave_records_are_personal(self):
+  with app.connect() as c:
+   teacher=self.user(c,'teacher');staff=self.user(c,'staff')
+   for u in [teacher,staff]:app.api('/api/records/leave','POST',{'staff':u['email'],'reason':'Sample personal leave'},u,c)
+   rows=app.api('/api/records/leave','GET',{},staff,c);self.assertEqual(1,len(rows));self.assertEqual(staff['email'],rows[0]['staff'])
+ def test_seed_restores_canonical_demo_roles(self):
+  with app.connect() as c:c.execute("UPDATE users SET role='admin' WHERE email='student.primary@demo.academy.example'")
+  seed()
+  with app.connect() as c:self.assertEqual('student',self.user(c,'student')['role'])
