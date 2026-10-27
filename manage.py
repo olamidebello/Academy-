@@ -11,3 +11,8 @@ if a.command=='create-superadmin':
   else: tid=t[0]
   c.execute('INSERT INTO users(tenant,email,password,role) VALUES(?,?,?,?)',(tid,a.email.lower(),app.password(pw),'superadmin'))
  print('Super administrator created')
+
+if a.command=='init':
+ from demo_seed import seed
+ seed()
+ print('Schema and public demo accounts initialized')
