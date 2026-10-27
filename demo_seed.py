@@ -19,6 +19,7 @@ def seed():
     u=c.execute('SELECT id FROM users WHERE email=?',(email,)).fetchone()
     if u:
      if not c.execute('SELECT 1 FROM demo_users WHERE user=?',(u[0],)).fetchone(): raise ValueError('Reserved demo email already belongs to a non-demo user; no privileges changed')
+     c.execute('UPDATE users SET role=?,tenant=? WHERE id=?',(role,tenant,u[0]))
     else:
      uid=c.execute('INSERT INTO users(tenant,email,password,role) VALUES(?,?,?,?)',(tenant,email,app.password(PASSWORD),role)).lastrowid
      c.execute('INSERT INTO demo_users VALUES(?)',(uid,))
