@@ -8,8 +8,25 @@ from wsgiref.simple_server import make_server
 DB=os.environ.get('ACADEMY_DB','academy.db')
 ROLES={'admin','teacher','student','parent','accountant','staff'}
 MODULES={'students':['name','email','level','guardian'], 'staff':['name','email','title','salary','hourly_rate'], 'courses':['name','code','level','credits'], 'lessons':['name','course','content','video_url'], 'assignments':['name','course','instructions','due_date'], 'submissions':['assignment','answer'], 'attendance':['student','date','status'], 'grades':['student','course','assessment','score','maximum','weight'], 'progress':['student','period','goals','observations','interventions'], 'invoices':['student','description','amount','currency','status'], 'library':['name','author','identifier','status'], 'transport':['name','route','driver'], 'hostels':['name','room','capacity'], 'inventory':['name','quantity','location'], 'announcements':['name','content'], 'leave':['staff','start','end','reason','status'], 'promotions':['staff','title','salary','effective_date','reason'], 'programs':['name','level','department','credits'], 'timetable':['course','teacher','day','start','end','room'], 'admissions':['name','email','level','status'], 'events':['name','date','description']}
-READ={'teacher':set(MODULES)-{'staff','promotions'},'student':{'courses','lessons','assignments','announcements','timetable','events','programs'},'parent':{'announcements','events'},'accountant':{'staff','invoices','promotions'},'staff':{'announcements','events','timetable'}}
-WRITE={'teacher':{'lessons','assignments','attendance','grades','progress'},'accountant':{'invoices'},'student':{'submissions'},'staff':set(),'parent':set()}
+READ={
+ 'teacher':{'students','courses','programs','lessons','assignments','submissions','attendance','grades','progress','timetable','announcements','events','library','leave'},
+ 'student':{'courses','programs','lessons','assignments','submissions','timetable','announcements','events','library'},
+ 'parent':{'announcements','events'},
+ 'accountant':{'staff','invoices','promotions','leave'},
+ 'staff':{'announcements','events','timetable','leave'}
+}
+WRITE={'teacher':{'lessons','assignments','attendance','grades','progress','leave'},'accountant':{'invoices','leave'},'student':{'submissions'},'staff':{'leave'},'parent':set()}
+FEATURES={
+ 'superadmin':{'exams','report','clock','payroll','users','settings','audit','institutions'},
+ 'admin':{'exams','report','clock','payroll','users','settings','audit'},
+ 'teacher':{'exams','report','clock'},'student':{'exams'},'parent':set(),
+ 'accountant':{'payroll','clock'},'staff':{'clock'}
+}
+def permissions(role):
+ full=role in {'admin','superadmin'}
+ return {'read':sorted(MODULES if full else READ.get(role,set())),
+         'write':sorted(MODULES if full else WRITE.get(role,set())),
+         'features':sorted(FEATURES.get(role,set()))}
 def connect():
  c=sqlite3.connect(DB); c.row_factory=sqlite3.Row; return c
 def init():
@@ -42,7 +59,10 @@ def api(path,method,d,u,c):
   if path not in allowed and not path.startswith('/api/records/'): raise PermissionError('Live transactions, integrations and production access are disabled in demos')
  def admin():
   if role not in {'admin','superadmin'}: raise PermissionError('Administrator access required')
- if path=='/api/me': return {**dict(u),'is_demo':demo}
+ if role not in FEATURES: raise PermissionError('Unknown role')
+ feature={'/api/tenants':'institutions','/api/switch-tenant':'institutions','/api/users':'users','/api/settings':'settings','/api/report':'report','/api/exams':'exams','/api/attempt':'exams','/api/demo-reset-attempts':'exams','/api/clock':'clock','/api/payroll':'payroll','/api/audit':'audit'}.get(path)
+ if feature and feature not in FEATURES[role]: raise PermissionError('This feature is not available to your role')
+ if path=='/api/me': return {**dict(u),'is_demo':demo,'permissions':permissions(role)}
  if path=='/api/tenants':
   if role!='superadmin': raise PermissionError('Platform administrator required')
   if method=='POST':
@@ -75,10 +95,10 @@ def api(path,method,d,u,c):
  if path.startswith('/api/records/'):
   mod=path.split('/')[3]
   if mod not in MODULES: raise ValueError('Unknown module')
-  own=mod in {'submissions','leave'} and role not in {'admin','superadmin','teacher','accountant'}
-  if role not in {'admin','superadmin'} and mod not in READ.get(role,set()) and not own: raise PermissionError('Module access denied')
+  own=(mod=='submissions' and role=='student') or (mod=='leave' and role not in {'admin','superadmin'})
+  if role not in {'admin','superadmin'} and mod not in READ.get(role,set()): raise PermissionError('Module access denied')
   if method=='POST':
-   if role not in {'admin','superadmin'} and mod not in WRITE.get(role,set()) and mod!='leave': raise PermissionError('Write access denied')
+   if role not in {'admin','superadmin'} and mod not in WRITE.get(role,set()): raise PermissionError('Write access denied')
    data={k:str(d.get(k,''))[:20000] for k in MODULES[mod]}
    if mod=='grades':
     if float(data['maximum'])<=0 or not 0<=float(data['score'])<=float(data['maximum']) or float(data['weight'])<=0: raise ValueError('Invalid grade')
