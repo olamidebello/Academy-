@@ -1,5 +1,6 @@
 """Academy: dependency-free, tenant-scoped school operations server."""
-import os, sqlite3, json, secrets, hashlib, hmac, time, math, html
+from pathlib import Path
+import os, sqlite3, json, secrets, hashlib, hmac, time, math, html, re
 from datetime import datetime, timezone
 from urllib.parse import parse_qs
 from wsgiref.simple_server import make_server
@@ -20,6 +21,7 @@ CREATE TABLE IF NOT EXISTS exams(id INTEGER PRIMARY KEY,tenant INTEGER,title TEX
 CREATE TABLE IF NOT EXISTS attempts(id INTEGER PRIMARY KEY,tenant INTEGER,exam INTEGER,user INTEGER,started REAL,answers TEXT DEFAULT '{}',submitted INTEGER DEFAULT 0,score REAL,UNIQUE(exam,user));
 CREATE TABLE IF NOT EXISTS punches(id INTEGER PRIMARY KEY,tenant INTEGER,user INTEGER,action TEXT,at REAL,lat REAL,lon REAL,accuracy REAL);
 CREATE TABLE IF NOT EXISTS payroll(id INTEGER PRIMARY KEY,tenant INTEGER,start REAL,end REAL,data TEXT,created REAL);
+CREATE TABLE IF NOT EXISTS legal_acceptances(user INTEGER,version TEXT,accepted REAL);
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY,tenant INTEGER,user INTEGER,action TEXT,at REAL);
 ''')
 def password(p,salt=None):
@@ -134,12 +136,30 @@ def api(path,method,d,u,c):
  if path=='/api/audit':
   admin(); return [dict(r) for r in c.execute('SELECT * FROM audit WHERE tenant=? ORDER BY id DESC LIMIT 200',(tenant,))]
  raise ValueError('Unknown endpoint')
+def register_institution(c,d):
+ email=str(d.get('email','')).strip().lower()
+ name=str(d.get('institution','')).strip()
+ level=str(d.get('level','')).strip()
+ pw=d.get('password','')
+ if not 2<=len(name)<=200: raise ValueError('Enter an institution name (2–200 characters)')
+ if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email) or len(email)>254: raise ValueError('Enter a valid email address')
+ if not isinstance(pw,str) or not 12<=len(pw)<=256: raise ValueError('Password must contain 12–256 characters')
+ if pw!=d.get('confirm_password'): raise ValueError('Passwords do not match')
+ if level not in {'preschool','primary','secondary','vocational','college','university','mixed'}: raise ValueError('Select an educational level')
+ if d.get('accept_terms') not in (True,'on'): raise ValueError('Accept the terms and acknowledge the privacy notice')
+ if c.execute('SELECT 1 FROM users WHERE email=?',(email,)).fetchone(): raise ValueError('This email is already registered. Sign in or contact your administrator.')
+ tenant=c.execute('INSERT INTO tenants(name,level) VALUES(?,?)',(name,level)).lastrowid
+ uid=c.execute('INSERT INTO users(tenant,email,password,role) VALUES(?,?,?,?)',(tenant,email,password(pw),'admin')).lastrowid
+ c.execute('INSERT INTO legal_acceptances VALUES(?,?,?)',(uid,'2026-10-26',time.time()))
+ audit(c,{'tenant':tenant,'id':uid},'institution self-registration and legal acceptance')
+ return {'ok':True,'message':'Institution created. You can now sign in.'}
+
 def application(env,start):
  status='200 OK'; headers=[('Content-Type','application/json'),('X-Content-Type-Options','nosniff'),('X-Frame-Options','DENY'),('Cache-Control','no-store'),('Content-Security-Policy',"default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'")]
  try:
   path=env.get('PATH_INFO','/'); method=env['REQUEST_METHOD']
-  if path in {'/','/static/app.js','/static/style.css'}:
-   file={'/':'index.html','/static/app.js':'app.js','/static/style.css':'style.css'}[path]; body=open(os.path.join(os.path.dirname(__file__),'static',file),'rb').read(); headers[0]=('Content-Type','text/html' if path=='/' else 'text/javascript' if path.endswith('js') else 'text/css')
+  if path in {'/','/signup','/terms','/privacy','/copyright','/static/app.js','/static/style.css'}:
+   file={'/':'index.html','/signup':'index.html','/terms':'terms.html','/privacy':'privacy.html','/copyright':'copyright.html','/static/app.js':'app.js','/static/style.css':'style.css'}[path]; body=(Path(__file__).parent/'static'/file).read_bytes(); headers[0]=('Content-Type','text/html; charset=utf-8' if file.endswith('.html') else 'text/javascript' if path.endswith('js') else 'text/css')
   elif path=='/health': body=b'{"status":"ok"}'
   else:
    size=int(env.get('CONTENT_LENGTH') or 0)
@@ -148,7 +168,12 @@ def application(env,start):
    with connect() as c:
     cookies=dict(pair.strip().split('=',1) for pair in env.get('HTTP_COOKIE','').split(';') if '=' in pair); token=cookies.get('academy','')
     u=c.execute('SELECT u.id,u.tenant,u.email,u.role FROM sessions s JOIN users u ON u.id=s.user WHERE s.token=? AND s.expires>?',(token,time.time())).fetchone()
-    if path=='/api/login':
+    if path=='/api/signup':
+     if method!='POST' or env.get('HTTP_X_ACADEMY_REQUEST')!='1': raise PermissionError('Request validation failed')
+     bucket='signup:'+env.get('REMOTE_ADDR',''); now=time.time(); recent=[t for t in LOGIN.get(bucket,[]) if t>now-3600]; LOGIN[bucket]=recent
+     if len(recent)>=5: raise PermissionError('Too many registration attempts; please try again later')
+     recent.append(now); result=register_institution(c,d)
+    elif path=='/api/login':
      if method!='POST': raise ValueError('POST required')
      bucket=env.get('REMOTE_ADDR',''); now=time.time(); recent=[t for t in LOGIN.get(bucket,[]) if t>now-300]; LOGIN[bucket]=recent
      if len(recent)>=10: raise PermissionError('Too many attempts; wait five minutes')
