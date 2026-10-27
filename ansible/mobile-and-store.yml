@@ -1,0 +1,48 @@
+---
+- name: Build and deploy installable Academy app
+  ansible.builtin.import_playbook: hard-repair.yml
+- name: Register Academy with existing African Apps Store
+  hosts: all
+  become: true
+  vars:
+    academy_store_db: /var/lib/africanappsstore/store.sqlite3
+    academy_store_root: /opt/africanappsstore
+  tasks:
+    - name: Verify mobile install page is deployed
+      ansible.builtin.uri:
+        url: https://academy.africandroid.world/install
+        return_content: true
+      register: academy_install
+      failed_when: academy_install.status != 200 or 'Install Academy' not in academy_install.content
+    - name: Register hosted app with database backup
+      ansible.builtin.command:
+        argv:
+          - python3
+          - '{{ playbook_dir }}/../scripts/register_store.py'
+          - --db
+          - '{{ academy_store_db }}'
+          - --listing
+          - '{{ playbook_dir }}/../mobile/store-listing.json'
+    - name: Display PWA format correctly in existing store cards
+      ansible.builtin.replace:
+        path: '{{ academy_store_root }}/static/app.js'
+        regexp: "'justisolve.com','sip.dobhrap.com'\\]\\.includes\\(a.domain\\)"
+        replace: "'justisolve.com','sip.dobhrap.com','academy.africandroid.world'].includes(a.domain)"
+        backup: true
+    - name: Read store renderer
+      ansible.builtin.slurp:
+        src: '{{ academy_store_root }}/static/app.js'
+      register: academy_store_ui
+    - name: Avoid pending APK message for installable web apps
+      ansible.builtin.replace:
+        path: '{{ academy_store_root }}/static/app.js'
+        regexp: ":'<p>APK build pending</p>'"
+        replace: ":a.install_url?'<p>Installable web app — no APK required</p>':'<p>APK build pending</p>'"
+        backup: true
+      when: "'Installable web app — no APK required' not in (academy_store_ui.content | b64decode)"
+    - name: Verify public store listing
+      ansible.builtin.uri:
+        url: https://africanappsstore.space/api/hosted-apps
+        return_content: true
+      register: academy_store_listing
+      failed_when: academy_store_listing.status != 200 or 'academy.africandroid.world/install' not in academy_store_listing.content
