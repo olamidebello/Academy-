@@ -1,0 +1,96 @@
+---
+- name: Deploy Academy
+  hosts: all
+  become: true
+  vars:
+    academy_domain: academy.africandroid.world
+    academy_port: 18840
+    academy_source: /opt/academy
+  tasks:
+    - name: Install runtime and proxy
+      ansible.builtin.apt:
+        name: [python3, python3-venv, nginx, git]
+        update_cache: true
+    - name: Create service account
+      ansible.builtin.user:
+        name: academy
+        system: true
+        home: /var/lib/academy
+        shell: /usr/sbin/nologin
+    - name: Create database directory
+      ansible.builtin.file:
+        path: /var/lib/academy
+        state: directory
+        owner: academy
+        group: academy
+        mode: '0700'
+    - name: Pull Academy source
+      ansible.builtin.git:
+        repo: https://github.com/olamidebello/Academy-.git
+        dest: '{{ academy_source }}'
+        version: main
+    - name: Install application server
+      ansible.builtin.pip:
+        name: gunicorn==23.0.0
+        virtualenv: /opt/academy-venv
+        virtualenv_command: python3 -m venv
+    - name: Initialize database
+      ansible.builtin.command: python3 {{ academy_source }}/manage.py init
+      become_user: academy
+      environment:
+        ACADEMY_DB: /var/lib/academy/academy.db
+      changed_when: false
+    - name: Install service
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/academy.service
+        content: |
+          [Unit]
+          Description=Academy institution platform
+          After=network.target
+          [Service]
+          User=academy
+          Group=academy
+          WorkingDirectory={{ academy_source }}
+          Environment=ACADEMY_DB=/var/lib/academy/academy.db
+          Environment=ACADEMY_SECURE_COOKIE=1
+          ExecStart=/opt/academy-venv/bin/gunicorn --workers 2 --bind 127.0.0.1:{{ academy_port }} app:application
+          Restart=on-failure
+          UMask=0077
+          NoNewPrivileges=true
+          ProtectSystem=strict
+          ReadWritePaths=/var/lib/academy
+          PrivateTmp=true
+          [Install]
+          WantedBy=multi-user.target
+    - name: Start Academy
+      ansible.builtin.systemd:
+        name: academy
+        enabled: true
+        state: restarted
+        daemon_reload: true
+    - name: Configure domain proxy
+      ansible.builtin.copy:
+        dest: /etc/nginx/sites-available/academy
+        content: |
+          server {
+            listen 80;
+            server_name {{ academy_domain }};
+            client_max_body_size 1m;
+            location / { proxy_pass http://127.0.0.1:{{ academy_port }}; proxy_set_header Host $host; proxy_set_header X-Forwarded-Proto $scheme; }
+          }
+    - name: Enable domain
+      ansible.builtin.file:
+        src: /etc/nginx/sites-available/academy
+        dest: /etc/nginx/sites-enabled/academy
+        state: link
+    - name: Validate nginx
+      ansible.builtin.command: nginx -t
+      changed_when: false
+    - name: Reload proxy
+      ansible.builtin.systemd:
+        name: nginx
+        state: reloaded
+    - name: Verify application
+      ansible.builtin.uri:
+        url: http://127.0.0.1:{{ academy_port }}/health
+        status_code: 200
