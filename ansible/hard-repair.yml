@@ -4,7 +4,7 @@
   become: true
   vars:
     academy_domain: academy.africandroid.world
-    academy_port: 18840
+    academy_port: 18940
     academy_email: ''
     academy_revision: main
   tasks:
@@ -12,13 +12,35 @@
       ansible.builtin.assert:
         that:
           - academy_domain == 'academy.africandroid.world'
-          - academy_port | int == 18840
+          - academy_port | int >= 1024
+          - academy_port | int <= 65535
+          - academy_port | int != 18840
     - name: Install runtime and repair tools
       ansible.builtin.apt:
         name: [python3, python3-venv, python3-pip, git, nginx, curl, openssl, certbot]
         update_cache: true
     - name: Validate current nginx
       ansible.builtin.command: nginx -t
+      changed_when: false
+    - name: Refuse to share a port owned by another application
+      ansible.builtin.shell: |
+        python3 - <<'PYPORT'
+        import socket, urllib.request, sys
+        port={{ academy_port | int }}
+        sock=socket.socket()
+        try:
+            sock.bind(('127.0.0.1',port))
+        except OSError:
+            try:
+                opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+                page=opener.open('http://127.0.0.1:'+str(port)+'/',timeout=5).read().decode()
+            except Exception:
+                sys.exit('Selected Academy port is occupied and cannot be identified; choose another academy_port. No process was stopped.')
+            if '<title>Academy' not in page:
+                sys.exit('Selected Academy port belongs to another application; choose another academy_port. No process was stopped.')
+        finally:
+            sock.close()
+        PYPORT
       changed_when: false
     - name: Create service account
       ansible.builtin.user:
@@ -122,6 +144,16 @@
           retries: 10
           delay: 2
           until: academy_health.status == 200
+        - name: Verify Academy identity on the dedicated backend
+          ansible.builtin.uri:
+            url: http://127.0.0.1:{{ academy_port }}/
+            return_content: true
+            use_proxy: false
+          register: academy_identity
+          retries: 10
+          delay: 2
+          until: academy_identity.status == 200 and '<title>Academy' in (academy_identity.content | default(''))
+          failed_when: academy_identity.status != 200 or '<title>Academy' not in (academy_identity.content | default(''))
         - name: Repair exact domain and verify HTTPS identity
           ansible.builtin.command:
             argv:
