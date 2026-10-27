@@ -22,6 +22,7 @@ def seed():
     else:
      uid=c.execute('INSERT INTO users(tenant,email,password,role) VALUES(?,?,?,?)',(tenant,email,app.password(PASSWORD),role)).lastrowid
      c.execute('INSERT INTO demo_users VALUES(?)',(uid,))
+   c.execute("UPDATE records SET data=replace(data,?,?) WHERE tenant=? AND module='announcements'",('Shared demo accounts are read-only.','Shared demo accounts are interactive within their role permissions.',tenant))
    if c.execute('SELECT 1 FROM records WHERE tenant=? LIMIT 1',(tenant,)).fetchone(): continue
    admin=c.execute('SELECT id FROM users WHERE tenant=? AND role=?',(tenant,'admin')).fetchone()[0]
    fixtures={
@@ -34,7 +35,7 @@ def seed():
     'progress':[dict(student='Alex Demo',period='Sample term',goals='Build confidence',observations='Steady progress and active participation',interventions='Weekly reading support')],
     'attendance':[dict(student='Alex Demo',date='2026-10-26',status='Present')],
     'invoices':[dict(student='Alex Demo',description='SAMPLE tuition — no payment required',amount='500',currency='USD',status='Demo only')],
-    'announcements':[dict(name='Welcome to the demo',content='All records are fictional. Shared demo accounts are read-only. No real payments or purchases are available.')],
+    'announcements':[dict(name='Welcome to the demo',content='All records are fictional. Shared demo accounts are interactive within their role permissions. No real payments or purchases are available.')],
     'programs':[dict(name='Sample learning program',level=group,department='General Education',credits='30')],
     'library':[dict(name='Learning Together',author='Example Author',identifier='DEMO-001',status='Available')],
     'events':[dict(name='Sample open day',date='Example date',description='Explore the institution workspace.')],
