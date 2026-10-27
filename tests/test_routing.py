@@ -11,3 +11,23 @@ class RoutingTests(unittest.TestCase):
   self.assertEqual((s,0),rename_conflicts(s,'academy.africandroid.world'))
  def test_idempotent(self):
   out,n=rename_conflicts('server_name academy.africandroid.world;','academy.africandroid.world');self.assertEqual((out,0),rename_conflicts(out,'academy.africandroid.world'))
+
+class CertificateTests(unittest.TestCase):
+ def check_certificate(self,results):
+  from scripts.repair_routing import certificate_usable
+  from unittest.mock import Mock,patch
+  path=Mock();path.exists.return_value=True
+  with patch('scripts.repair_routing.subprocess.run',side_effect=results):
+   return certificate_usable(path,path,'academy.africandroid.world')
+ def test_rejects_wrong_hostname(self):
+  from subprocess import CompletedProcess as R
+  self.assertFalse(self.check_certificate([R([],0),R([],1)]))
+ def test_rejects_untrusted_chain(self):
+  from subprocess import CompletedProcess as R
+  self.assertFalse(self.check_certificate([R([],0),R([],0),R([],1)]))
+ def test_rejects_mismatched_private_key(self):
+  from subprocess import CompletedProcess as R
+  self.assertFalse(self.check_certificate([R([],0),R([],0),R([],0),R([],0,b'one'),R([],0,b'two')]))
+ def test_accepts_valid_chain_hostname_and_key(self):
+  from subprocess import CompletedProcess as R
+  self.assertTrue(self.check_certificate([R([],0),R([],0),R([],0),R([],0,b'one'),R([],0,b'one')]))
