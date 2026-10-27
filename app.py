@@ -37,24 +37,32 @@ def api(path,method,d,u,c):
  demo=bool(c.execute('SELECT 1 FROM demo_users WHERE user=?',(u['id'],)).fetchone())
  if demo:
   if not c.execute('SELECT 1 FROM demo_tenants WHERE tenant=?',(tenant,)).fetchone(): raise PermissionError('Demo account is outside its sandbox')
-  if method!='GET' or path in {'/api/switch-tenant','/api/attempt'}: raise PermissionError('Public demo accounts are read-only. Create your own institution to save changes.')
+  allowed={'/api/me','/api/tenants','/api/switch-tenant','/api/users','/api/settings','/api/report','/api/exams','/api/attempt','/api/demo-reset-attempts','/api/clock','/api/payroll','/api/audit'}
+  if path not in allowed and not path.startswith('/api/records/'): raise PermissionError('Live transactions, integrations and production access are disabled in demos')
  def admin():
   if role not in {'admin','superadmin'}: raise PermissionError('Administrator access required')
  if path=='/api/me': return {**dict(u),'is_demo':demo}
  if path=='/api/tenants':
   if role!='superadmin': raise PermissionError('Platform administrator required')
-  if method=='POST': c.execute('INSERT INTO tenants(name,level) VALUES(?,?)',(d['name'],d['level'])); audit(c,u,'create institution')
+  if method=='POST':
+   tid=c.execute('INSERT INTO tenants(name,level) VALUES(?,?)',(('DEMO · ' if demo else '')+d['name'],d['level'])).lastrowid
+   if demo: c.execute('INSERT INTO demo_tenants VALUES(?)',(tid,))
+   audit(c,u,'create institution')
   return [dict(r) for r in c.execute('SELECT * FROM tenants'+(' WHERE id IN (SELECT tenant FROM demo_tenants)' if demo else ''))]
  if path=='/api/switch-tenant':
   if role!='superadmin': raise PermissionError('Platform administrator required')
   if method!='POST' or not c.execute('SELECT 1 FROM tenants WHERE id=?',(d.get('tenant'),)).fetchone(): raise ValueError('Valid institution required')
+  if demo and not c.execute('SELECT 1 FROM demo_tenants WHERE tenant=?',(d.get('tenant'),)).fetchone(): raise PermissionError('Demo users can only switch to demo institutions')
   c.execute('UPDATE users SET tenant=? WHERE id=?',(d['tenant'],u['id'])); audit(c,u,'switch institution'); return {'ok':True}
  if path=='/api/users':
   admin()
   if method=='POST':
    if d['role'] not in ROLES: raise ValueError('Invalid role')
    if len(d['password'])<12: raise ValueError('Password must have at least 12 characters')
-   c.execute('INSERT INTO users(tenant,email,password,role) VALUES(?,?,?,?)',(tenant,d['email'].lower(),password(d['password']),d['role'])); audit(c,u,'create user')
+   if demo and not re.fullmatch(r'[a-z0-9._+-]+@demo\.academy\.example',d['email'].lower()): raise ValueError('Demo user emails must end with @demo.academy.example')
+   uid=c.execute('INSERT INTO users(tenant,email,password,role) VALUES(?,?,?,?)',(tenant,d['email'].lower(),password(d['password']),d['role'])).lastrowid
+   if demo: c.execute('INSERT INTO demo_users VALUES(?)',(uid,))
+   audit(c,u,'create user')
   return [dict(r) for r in c.execute('SELECT id,email,role FROM users WHERE tenant=?',(tenant,))]
  if path=='/api/settings':
   admin()
@@ -97,6 +105,9 @@ def api(path,method,d,u,c):
     if q['type']=='choice' and q['answer'] not in q['options']: raise ValueError('Answer must match an option')
    c.execute('INSERT INTO exams(tenant,title,duration,questions,published) VALUES(?,?,?,?,?)',(tenant,d['title'],int(d['duration']),json.dumps(qs),int(bool(d.get('published'))))); audit(c,u,'create exam')
   rows=c.execute('SELECT * FROM exams WHERE tenant=?',(tenant,)); return [dict(id=r['id'],title=r['title'],duration=r['duration'],published=r['published']) for r in rows if r['published'] or role in {'admin','superadmin','teacher'}]
+ if path=='/api/demo-reset-attempts':
+  if not demo or role!='student' or method!='POST': raise PermissionError('Demo students only')
+  c.execute('DELETE FROM attempts WHERE tenant=? AND user=?',(tenant,u['id'])); audit(c,u,'reset demo exam attempts'); return {'ok':True}
  if path=='/api/attempt':
   if role!='student': raise PermissionError('Student account required')
   e=c.execute('SELECT * FROM exams WHERE id=? AND tenant=? AND published=1',(int(d['exam']),tenant)).fetchone()
@@ -198,4 +209,4 @@ def application(env,start):
  start(status,headers); return [body]
 LOGIN={}
 if __name__=='__main__':
- init(); make_server('127.0.0.1',int(os.environ.get('PORT','18840')),application).serve_forever()
+ init(); make_server('127.0.0.1',int(os.environ.get('PORT','18940')),application).serve_forever()
