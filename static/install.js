@@ -1,0 +1,8 @@
+let promptEvent;const button=document.querySelector('#install-app'),status=document.querySelector('#install-status');
+if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js').catch(()=>{status.textContent='Automatic install setup failed. You can still open Academy in your browser.'});
+function standalone(){return window.matchMedia('(display-mode: standalone)').matches||navigator.standalone===true}
+if(standalone()){status.textContent='Academy is already running as an installed app.';button.hidden=true}
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();promptEvent=e;button.hidden=false;status.textContent='Academy is ready to install.'});
+button.addEventListener('click',async()=>{if(!promptEvent)return;await promptEvent.prompt();const choice=await promptEvent.userChoice;status.textContent=choice.outcome==='accepted'?'Install request accepted. Look for Academy on your home screen.':'Installation cancelled. You can try again from the browser menu.';promptEvent=null;button.hidden=true});
+window.addEventListener('appinstalled',()=>{status.textContent='Academy was installed.';button.hidden=true});
+const ua=navigator.userAgent;document.querySelector('#device').textContent=/iPad|iPhone|iPod/.test(ua)||(/Macintosh/.test(ua)&&navigator.maxTouchPoints>1)?'On iPhone/iPad: open this page in Safari, tap Share, then Add to Home Screen and Add.':/Android/.test(ua)?'On Android: use Install Academy when available, or the browser menu → Install app / Add to Home screen.':'On desktop: use the address-bar install icon or browser menu → Install Academy. Installation support depends on your browser.';
